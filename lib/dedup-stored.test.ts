@@ -5,6 +5,7 @@ import {
   MAX_UNPUBLISH_PER_RUN,
   classifyGroups,
   droppedIds,
+  fetchDuplicateIds,
   fetchPublishedUpcoming,
   findStoredDuplicates,
   rowToCandidate,
@@ -240,5 +241,48 @@ describe('fetchPublishedUpcoming', () => {
     const { client } = clientReturning(range);
 
     await expect(fetchPublishedUpcoming(client)).rejects.toThrow('boom');
+  });
+});
+
+describe('fetchDuplicateIds', () => {
+  function clientReturning(result: ReturnType<typeof vi.fn>) {
+    const chain: Record<string, unknown> = { in: result };
+    for (const method of ['select', 'eq']) chain[method] = vi.fn(() => chain);
+    return {
+      client: { from: vi.fn(() => chain) } as unknown as SupabaseClient,
+      chain,
+    };
+  }
+
+  it('returns the ids already flagged as duplicates', async () => {
+    const inFn = vi
+      .fn()
+      .mockResolvedValue({ data: [{ id: 'cr_2' }], error: null });
+    const { client, chain } = clientReturning(inFn);
+
+    const flagged = await fetchDuplicateIds(client, ['cr_1', 'cr_2']);
+
+    expect([...flagged]).toEqual(['cr_2']);
+    expect(chain.eq).toHaveBeenCalledWith('status', 'duplicate');
+    expect(inFn).toHaveBeenCalledWith('id', ['cr_1', 'cr_2']);
+  });
+
+  it('queries in chunks so a large push does not build an oversized filter', async () => {
+    const inFn = vi.fn().mockResolvedValue({ data: [], error: null });
+    const { client } = clientReturning(inFn);
+    const ids = Array.from({ length: 2500 }, (_, i) => `cr_${i}`);
+
+    await fetchDuplicateIds(client, ids);
+
+    expect(inFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('throws on a database error', async () => {
+    const inFn = vi
+      .fn()
+      .mockResolvedValue({ data: null, error: { message: 'boom' } });
+    const { client } = clientReturning(inFn);
+
+    await expect(fetchDuplicateIds(client, ['cr_1'])).rejects.toThrow('boom');
   });
 });

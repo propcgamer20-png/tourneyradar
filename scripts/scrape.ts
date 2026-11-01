@@ -7,6 +7,7 @@ import {
   MAX_UNPUBLISH_PER_RUN,
   classifyGroups,
   droppedIds,
+  fetchDuplicateIds,
   fetchPublishedUpcoming,
   findStoredDuplicates,
 } from '../lib/dedup-stored';
@@ -121,12 +122,7 @@ async function dedupStoredRows(dryRun: boolean): Promise<void> {
       .update({ status: DUPLICATE_STATUS })
       .in('id', chunk)
       .eq('status', 'published');
-    if (error) {
-      await logScraperFailure('dedup', `could not set status "${DUPLICATE_STATUS}": ${error.message}`);
-      console.error(`  Failed to unpublish duplicates: ${error.message}`);
-      process.exitCode = 1;
-      return;
-    }
+    if (error) throw new Error(`could not set status "${DUPLICATE_STATUS}": ${error.message}`);
   }
 
   const detail = groups
@@ -594,7 +590,21 @@ const REGION_MAP: Record<string, string[]> = {
 // ========== PUSH TO SUPABASE ==========
 async function pushTournaments(tournaments: ScrapedTournament[]): Promise<number> {
   let saved = 0;
+  // The upsert below writes status 'published'. Rows an earlier run flagged as duplicates are
+  // skipped so they are not re-published on every scrape.
+  let flagged = new Set<string>();
+  try {
+    flagged = await fetchDuplicateIds(supabase, tournaments.map(t => t.id));
+  } catch (err) {
+    console.error(`  Could not check for flagged duplicates, pushing everything: ${errorMessage(err)}`);
+  }
+  if (flagged.size > 0) console.log(`  Skipping ${flagged.size} row(s) already flagged as duplicates`);
   for (const t of tournaments) {
+    if (flagged.has(t.id)) {
+      // Counted as handled: callers fail the run when saved < pushed.
+      saved++;
+      continue;
+    }
     const { error } = await supabase.from('tournaments').upsert({
       id: t.id,
       name: t.name,
@@ -637,7 +647,13 @@ async function main() {
   const outputArg = getArg('--output');
 
   if (process.argv.includes('--dedup-stored')) {
-    await dedupStoredRows(process.argv.includes('--dry-run'));
+    try {
+      await dedupStoredRows(process.argv.includes('--dry-run'));
+    } catch (err) {
+      console.error(`  Stored-row dedup failed: ${errorMessage(err)}`);
+      await logScraperFailure('dedup', errorMessage(err));
+      process.exitCode = 1;
+    }
     return;
   }
 

@@ -131,6 +131,32 @@ export function droppedIds(groups: DuplicateGroup[]): string[] {
   ];
 }
 
+/**
+ * Ids among `ids` that an earlier run already flagged as duplicates. The push upserts
+ * `status: 'published'`, so without this the next scrape would re-publish every flagged copy
+ * and leave it visible until the stored-row pass runs again.
+ */
+export async function fetchDuplicateIds(
+  client: SupabaseClient,
+  ids: string[],
+): Promise<Set<string>> {
+  const flagged = new Set<string>();
+
+  for (let i = 0; i < ids.length; i += PAGE_SIZE) {
+    const { data, error } = await client
+      .from('tournaments')
+      .select('id')
+      .eq('status', DUPLICATE_STATUS)
+      .in('id', ids.slice(i, i + PAGE_SIZE));
+
+    if (error) throw new Error(`fetchDuplicateIds: ${error.message}`);
+    for (const row of (data ?? []) as unknown as { id: string }[])
+      flagged.add(row.id);
+  }
+
+  return flagged;
+}
+
 export async function fetchPublishedUpcoming(
   client: SupabaseClient,
   today: string = new Date().toISOString().slice(0, 10),
